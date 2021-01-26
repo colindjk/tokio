@@ -1,7 +1,6 @@
 use crate::Stream;
-use async_stream::stream;
 use std::pin::Pin;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
 
 use std::fmt;
@@ -12,7 +11,7 @@ use std::task::{Context, Poll};
 /// [`tokio::sync::broadcast::Receiver`]: struct@tokio::sync::broadcast::Receiver
 /// [`Stream`]: trait@crate::Stream
 pub struct BroadcastStream<T> {
-    inner: Pin<Box<dyn Stream<Item = Result<T, BroadcastStreamRecvError>> + Send + Sync>>,
+    inner: Receiver<T>
 }
 
 /// An error returned from the inner stream of a [`BroadcastStream`].
@@ -27,29 +26,23 @@ pub enum BroadcastStreamRecvError {
 
 impl<T: Clone + Unpin + 'static + Send + Sync> BroadcastStream<T> {
     /// Create a new `BroadcastStream`.
-    pub fn new(mut rx: Receiver<T>) -> Self {
-        let stream = stream! {
-            loop {
-                match rx.recv().await {
-                    Ok(item) => yield Ok(item),
-                    Err(err) => match err {
-                        RecvError::Closed => break,
-                        RecvError::Lagged(n) => yield Err(BroadcastStreamRecvError::Lagged(n)),
-                    },
-                }
-            }
-        };
-        Self {
-            inner: Box::pin(stream),
-        }
+    pub fn new(rx: Receiver<T>) -> Self {
+        Self { inner: rx }
     }
 }
 
 impl<T: Clone> Stream for BroadcastStream<T> {
     type Item = Result<T, BroadcastStreamRecvError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.try_recv() {
+            Ok(item) => Poll::Ready(Some(Ok(item))),
+            Err(TryRecvError::Empty) => Poll::Pending,
+            Err(TryRecvError::Closed) => Poll::Ready(None),
+
+            Err(TryRecvError::Lagged(amt)) =>
+                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(amt)))),
+        }
     }
 }
 
